@@ -1,0 +1,384 @@
+<%#
+ Copyright 2024 LinxDot
+ Licensed to the public under the Apache License 2.0.
+%>
+
+<%+header%>
+
+<style type="text/css">
+.lora-status-box {
+	padding: 1em;
+	margin-bottom: 1em;
+	border-radius: 4px;
+}
+.lora-status-box.running {
+	background: #e8f5e9;
+	border: 1px solid #4caf50;
+}
+.lora-status-box.stopped {
+	background: #ffebee;
+	border: 1px solid #f44336;
+}
+.lora-grid {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 1em;
+}
+.lora-card {
+	background: #fff;
+	border: 1px solid #ddd;
+	border-radius: 4px;
+	padding: 1em;
+}
+.lora-card h3 {
+	margin-top: 0;
+	font-size: 1.1em;
+	color: #333;
+	border-bottom: 1px solid #eee;
+	padding-bottom: 0.5em;
+}
+.lora-row {
+	display: flex;
+	justify-content: space-between;
+	padding: 0.4em 0;
+	border-bottom: 1px solid #f5f5f5;
+}
+.lora-row:last-child {
+	border-bottom: none;
+}
+.lora-label {
+	font-weight: bold;
+	color: #666;
+}
+.lora-value {
+	font-family: monospace;
+	color: #333;
+}
+.lora-logs {
+	width: 100%;
+	min-height: 240px;
+	font-family: monospace;
+	font-size: 0.85em;
+	background: #1e1e1e;
+	color: #d4d4d4;
+	border: none;
+	border-radius: 4px;
+	padding: 1em;
+	resize: vertical;
+}
+.btn-restart {
+	background: #ff9800;
+	color: white;
+}
+.btn-stop {
+	background: #f44336;
+	color: white;
+	margin-left: 0.5em;
+}
+.btn-start {
+	background: #4caf50;
+	color: white;
+	margin-left: 0.5em;
+}
+.btn-apply {
+	background: #4caf50;
+	color: white;
+	margin-left: 0.5em;
+}
+#lora-msg {
+	margin-top: 0.5em;
+	padding: 0.5em;
+	border-radius: 3px;
+	display: none;
+}
+#lora-msg.success {
+	background: #e8f5e9;
+	color: #2e7d32;
+	display: block;
+}
+#lora-msg.error {
+	background: #ffebee;
+	color: #c62828;
+	display: block;
+}
+@media (max-width: 800px) {
+	.lora-grid {
+		grid-template-columns: 1fr;
+	}
+}
+</style>
+
+<script type="text/javascript">//<![CDATA[
+
+var loraXHR = new XHR();
+var refreshTimer = null;
+
+function showMsg(text, isError) {
+	var el = document.getElementById('lora-msg');
+	el.textContent = text;
+	el.className = isError ? 'error' : 'success';
+	setTimeout(function() { el.className = ''; el.textContent = ''; }, 4000);
+}
+
+function refreshStatus() {
+	loraXHR.get('<%=url("admin/services/lora/api/status")%>', null,
+		function(x, data) {
+			if (!data) return;
+
+			var box = document.getElementById('lora-status-box');
+			if (data.running) {
+				box.className = 'lora-status-box running';
+				box.innerHTML = '<strong>Status:</strong> 🟢 Running &nbsp;|&nbsp; <strong>Region:</strong> ' + (data.region || '--');
+			} else {
+				box.className = 'lora-status-box stopped';
+				box.innerHTML = '<strong>Status:</strong> 🔴 Stopped &nbsp;|&nbsp; <strong>Region:</strong> ' + (data.region || '--');
+			}
+
+			// Update region select options dynamically
+			var sel = document.getElementById('region-select');
+			var currentVal = sel.value;
+			if (data.regions && data.regions.length > 0) {
+				var opts = '';
+				for (var i = 0; i < data.regions.length; i++) {
+					var r = data.regions[i];
+					opts += '<option value="' + r + '"' + (r === data.region ? ' selected' : '') + '>' + r + '</option>';
+				}
+				if (sel.innerHTML !== opts) sel.innerHTML = opts;
+			}
+			// Ensure correct region is selected
+			if (data.region) sel.value = data.region;
+
+			// Pre-fill inputs if they are empty or match old values
+			var srvInput = document.getElementById('server-input');
+			if (!srvInput.value || srvInput.dataset.last === srvInput.value) {
+				srvInput.value = (data.server_address && data.server_address !== 'unknown') ? data.server_address : '';
+				srvInput.dataset.last = srvInput.value;
+			}
+			var portInput = document.getElementById('port-input');
+			if (!portInput.value || portInput.dataset.last === portInput.value) {
+				portInput.value = (data.server_port_up && data.server_port_up !== 0) ? data.server_port_up : '';
+				portInput.dataset.last = portInput.value;
+			}
+
+			// Update buttons visibility
+			var btnRestart = document.getElementById('btn-restart');
+			var btnStop = document.getElementById('btn-stop');
+			if (data.running) {
+				btnRestart.textContent = '<%:Restart LoRa%>';
+				btnRestart.className = 'cbi-button btn-restart';
+				btnRestart.style.display = '';
+				btnStop.style.display = '';
+			} else {
+				btnRestart.textContent = '<%:Start LoRa%>';
+				btnRestart.className = 'cbi-button btn-start';
+				btnRestart.style.display = '';
+				btnStop.style.display = 'none';
+			}
+
+			document.getElementById('val-gw-id').textContent = data.gateway_id || '--';
+			document.getElementById('val-server').textContent = data.server_address || '--';
+			document.getElementById('val-port').textContent = (data.server_port_up || '--') + '/' + (data.server_port_down || '--');
+			document.getElementById('val-chip').textContent = data.chip_version || '--';
+			document.getElementById('val-temp').textContent = (data.temperature !== undefined ? data.temperature.toFixed(1) : '--') + ' °C';
+			document.getElementById('val-rx').textContent = data.rx_packets_total !== undefined ? data.rx_packets_total : '--';
+			document.getElementById('val-tx').textContent = data.tx_packets !== undefined ? data.tx_packets : '--';
+			document.getElementById('val-fw').textContent = data.rx_forwarded !== undefined ? data.rx_forwarded : '--';
+			document.getElementById('val-ack').textContent = (data.push_ack_percent !== undefined ? data.push_ack_percent.toFixed(0) : '--') + '%';
+			document.getElementById('val-ip').textContent = data.ip_address || '--';
+			document.getElementById('val-uptime').textContent = formatUptime(data.uptime_seconds);
+		}
+	);
+}
+
+function refreshLogs() {
+	loraXHR.get('<%=url("admin/services/lora/api/logs")%>?lines=50', null,
+		function(x) {
+			var ta = document.getElementById('lora-logs');
+			var txt = x.responseText;
+			if (txt !== undefined) {
+				var wasBottom = (ta.scrollTop + ta.clientHeight >= ta.scrollHeight - 10);
+				ta.value = txt;
+				if (wasBottom) ta.scrollTop = ta.scrollHeight;
+			}
+		}
+	);
+}
+
+function doRestart() {
+	if (!confirm('<%:Restart LoRa Packet Forwarder?%>')) return;
+	loraXHR.get('<%=url("admin/services/lora/api/restart")%>', null,
+		function(x, data) {
+			showMsg('<%:Restarted!%>', false);
+			setTimeout(refreshStatus, 2000);
+		}
+	);
+}
+
+function doStop() {
+	if (!confirm('<%:Stop LoRa Packet Forwarder?%>')) return;
+	loraXHR.get('<%=url("admin/services/lora/api/stop")%>', null,
+		function(x, data) {
+			showMsg('<%:Stopped!%>', false);
+			setTimeout(refreshStatus, 1500);
+		}
+	);
+}
+
+function doSetRegion() {
+	var region = document.getElementById('region-select').value;
+	if (!region) { showMsg('<%:Select a region%>', true); return; }
+	if (!confirm('<%:Apply region %> ' + region + '? <%:LoRa will restart.%>')) return;
+	loraXHR.post('<%=url("admin/services/lora/api/set_region")%>', { region: region },
+		function(x, data) {
+			showMsg('<%:Region applied!%>', false);
+			setTimeout(refreshStatus, 3000);
+		}
+	);
+}
+
+function doSetPort() {
+	var port = parseInt(document.getElementById("port-input").value);
+	if (!port || port < 1 || port > 65535) { showMsg("<%:Enter valid port (1-65535)%>", true); return; }
+	loraXHR.post("<%=url("admin/services/lora/api/set_port")%>", { port: port },
+		function(x, data) {
+			showMsg("<%:Port updated!%>", false);
+			setTimeout(refreshStatus, 3000);
+		}
+	);
+}
+
+function doSetServer() {
+	var server = document.getElementById('server-input').value.trim();
+	if (!server) { showMsg('<%:Enter server address%>', true); return; }
+	loraXHR.post('<%=url("admin/services/lora/api/set_server")%>', { server: server },
+		function(x, data) {
+			showMsg('<%:Server updated!%>', false);
+			setTimeout(refreshStatus, 3000);
+		}
+	);
+}
+
+function formatUptime(sec) {
+	if (!sec) return '--';
+	var d = Math.floor(sec / 86400);
+	var h = Math.floor((sec % 86400) / 3600);
+	var m = Math.floor((sec % 3600) / 60);
+	var s = Math.floor(sec % 60);
+	var parts = [];
+	if (d > 0) parts.push(d + 'd');
+	if (h > 0 || d > 0) parts.push(h + 'h');
+	parts.push(m + 'm');
+	parts.push(s + 's');
+	return parts.join(' ');
+}
+
+function startRefresh() {
+	refreshStatus();
+	refreshLogs();
+	refreshTimer = setInterval(function() {
+		refreshStatus();
+		refreshLogs();
+	}, 5000);
+}
+
+function stopRefresh() {
+	if (refreshTimer) clearInterval(refreshTimer);
+}
+
+document.addEventListener('DOMContentLoaded', startRefresh);
+window.addEventListener('beforeunload', stopRefresh);
+
+//]]></script>
+
+<div class="cbi-map">
+	<h2 name="content"><%:LoRa Packet Forwarder%></h2>
+
+	<div id="lora-status-box" class="lora-status-box">Loading...</div>
+	<div id="lora-msg"></div>
+
+	<div class="lora-grid">
+		<div class="lora-card">
+			<h3><%:Configuration%></h3>
+			<div class="lora-row">
+				<span class="lora-label"><%:Region%></span>
+				<span>
+					<select id="region-select"></select>
+					<button class="cbi-button btn-apply" onclick="doSetRegion()"><%:Apply%></button>
+				</span>
+			</div>
+			<div class="lora-row">
+				<span class="lora-label"><%:Server Address%></span>
+				<span>
+					<input type="text" id="server-input" placeholder="eu1.cloud.thethings.network" style="width:180px"/>
+					<button class="cbi-button btn-apply" onclick="doSetServer()"><%:Apply%></button>
+				</span>
+			</div>
+			<div class="lora-row">
+				<span class="lora-label"><%:Port%></span>
+				<span>
+					<input type="number" id="port-input" placeholder="1700" style="width:80px"/>
+					<button class="cbi-button btn-apply" onclick="doSetPort()"><%:Apply%></button>
+				</span>
+			</div>
+			<div class="lora-row">
+				<span class="lora-label"><%:Gateway ID%></span>
+				<span class="lora-value" id="val-gw-id">--</span>
+			</div>
+			<div class="lora-row">
+				<span class="lora-label"><%:Server%></span>
+				<span class="lora-value" id="val-server">--</span>
+			</div>
+			<div class="lora-row">
+				<span class="lora-label"><%:Port Up/Down%></span>
+				<span class="lora-value" id="val-port">--</span>
+			</div>
+			<div class="lora-row" style="margin-top:1em">
+				<button id="btn-restart" class="cbi-button btn-restart" onclick="doRestart()"><%:Restart LoRa%></button>
+				<button id="btn-stop" class="cbi-button btn-stop" onclick="doStop()"><%:Stop LoRa%></button>
+			</div>
+		</div>
+
+		<div class="lora-card">
+			<h3><%:Statistics%></h3>
+			<div class="lora-row">
+				<span class="lora-label"><%:Chip Version%></span>
+				<span class="lora-value" id="val-chip">--</span>
+			</div>
+			<div class="lora-row">
+				<span class="lora-label"><%:Temperature%></span>
+				<span class="lora-value" id="val-temp">--</span>
+			</div>
+			<div class="lora-row">
+				<span class="lora-label"><%:RX Packets%></span>
+				<span class="lora-value" id="val-rx">--</span>
+			</div>
+			<div class="lora-row">
+				<span class="lora-label"><%:TX Packets%></span>
+				<span class="lora-value" id="val-tx">--</span>
+			</div>
+			<div class="lora-row">
+				<span class="lora-label"><%:Forwarded%></span>
+				<span class="lora-value" id="val-fw">--</span>
+			</div>
+			<div class="lora-row">
+				<span class="lora-label"><%:ACK Rate%></span>
+				<span class="lora-value" id="val-ack">--</span>
+			</div>
+			<div class="lora-row">
+				<span class="lora-label"><%:IP Address%></span>
+				<span class="lora-value" id="val-ip">--</span>
+			</div>
+			<div class="lora-row">
+				<span class="lora-label"><%:Uptime%></span>
+				<span class="lora-value" id="val-uptime">--</span>
+			</div>
+		</div>
+	</div>
+
+	<div class="lora-card" style="margin-top:1em">
+		<h3><%:Log%></h3>
+		<textarea id="lora-logs" class="lora-logs" readonly></textarea>
+	</div>
+</div>
+
+<%+footer%>
