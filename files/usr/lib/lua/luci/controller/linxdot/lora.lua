@@ -9,6 +9,9 @@ function index()
 	entry({"admin", "services", "lora", "api", "set_region"}, call("action_set_region")).leaf = true
 	entry({"admin", "services", "lora", "api", "set_server"}, call("action_set_server")).leaf = true
 	entry({"admin", "services", "lora", "api", "set_port"}, call("action_set_port")).leaf = true
+	entry({"admin", "services", "lora", "api", "set_coords"}, call("action_set_coords")).leaf = true
+	entry({"admin", "services", "lora", "api", "set_tx_power"}, call("action_set_tx_power")).leaf = true
+	entry({"admin", "services", "lora", "api", "set_tx_lut"}, call("action_set_tx_lut")).leaf = true
 	entry({"admin", "services", "lora", "api", "logs"}, call("action_logs")).leaf = true
 end
 
@@ -79,6 +82,32 @@ local function get_config_path(region)
 	return "/etc/lora/global_conf.json.sx1250." .. region
 end
 
+local function read_thermal_temp()
+	local fs = require "nixio.fs"
+	local temp_paths = {
+		"/sys/class/thermal/thermal_zone0/temp",
+		"/sys/class/thermal/thermal_zone1/temp"
+	}
+	local max_temp = nil
+	for _, p in ipairs(temp_paths) do
+		if fs.access(p) then
+			local f = io.open(p, "r")
+			if f then
+				local val = f:read("*l")
+				f:close()
+				local t = tonumber(val)
+				if t then
+					if t > 1000 then t = t / 1000 end
+					if not max_temp or t > max_temp then
+						max_temp = t
+					end
+				end
+			end
+		end
+	end
+	return max_temp
+end
+
 function action_status()
 	local status = {}
 
@@ -93,12 +122,33 @@ function action_status()
 		status.server_address = gc.server_address or "unknown"
 		status.server_port_up = gc.serv_port_up or 0
 		status.server_port_down = gc.serv_port_down or 0
+		status.ref_latitude = gc.ref_latitude or 0
+		status.ref_longitude = gc.ref_longitude or 0
+		status.ref_altitude = gc.ref_altitude or 0
+		status.fake_gps = gc.fake_gps or false
 	else
 		status.gateway_id = "unknown"
 		status.server_address = "unknown"
 		status.server_port_up = 0
 		status.server_port_down = 0
+		status.ref_latitude = 0
+		status.ref_longitude = 0
+		status.ref_altitude = 0
+		status.fake_gps = false
 	end
+
+	local max_tx = 0
+	if cfg and cfg.SX130x_conf and cfg.SX130x_conf.radio_0 and cfg.SX130x_conf.radio_0.tx_gain_lut then
+		status.tx_gain_lut = cfg.SX130x_conf.radio_0.tx_gain_lut
+		for _, entry in ipairs(cfg.SX130x_conf.radio_0.tx_gain_lut) do
+			if entry.rf_power and entry.rf_power > max_tx then
+				max_tx = entry.rf_power
+			end
+		end
+	else
+		status.tx_gain_lut = {}
+	end
+	status.max_tx_power = max_tx
 
 	local log = read_file("/var/log/lora_pkt_fwd.log", 32768)
 	status.log_snippet = log
@@ -106,10 +156,13 @@ function action_status()
 	local chip = log:match("chip version is 0x([0-9a-fA-F]+)")
 	status.chip_version = chip and ("0x" .. chip) or "unknown"
 
-	local temp = log:match("Concentrator temperature:%s+([%d%.]+)")
-	status.temperature = temp and tonumber(temp) or 0
+	local temp = read_thermal_temp()
+	if not temp then
+		temp = log:match("Concentrator temperature:%s+([%d%.]+)")
+		temp = temp and tonumber(temp) or 0
+	end
+	status.temperature = temp
 
-	-- Parse last report block (multiline safe)
 	local last_report = log:match("#####[%s%S]-##### END #####")
 	if last_report then
 		local rxnb = last_report:match("RF packets received by concentrator:%s+(%d+)")
@@ -161,7 +214,6 @@ function action_set_region()
 		luci.http.status(400, "Bad Request")
 		return
 	end
-	-- Sanitize: only alphanumeric, underscore, hyphen
 	region = region:gsub("[^%w_-]", "")
 	if region == "" then
 		luci.http.status(400, "Bad Request")
@@ -176,7 +228,6 @@ function action_set_region()
 		return
 	end
 
-	-- Sync settings from old region to new region
 	local old_region = get_current_region()
 	local old_cfg = parse_json(get_config_path(old_region))
 	local new_cfg = parse_json(cfg_path)
@@ -190,14 +241,30 @@ function action_set_region()
 		if old_cfg.gateway_conf.serv_port_down then
 			new_cfg.gateway_conf.serv_port_down = old_cfg.gateway_conf.serv_port_down
 		end
+		if old_cfg.gateway_conf.ref_latitude ~= nil then
+			new_cfg.gateway_conf.ref_latitude = old_cfg.gateway_conf.ref_latitude
+		end
+		if old_cfg.gateway_conf.ref_longitude ~= nil then
+			new_cfg.gateway_conf.ref_longitude = old_cfg.gateway_conf.ref_longitude
+		end
+		if old_cfg.gateway_conf.ref_altitude ~= nil then
+			new_cfg.gateway_conf.ref_altitude = old_cfg.gateway_conf.ref_altitude
+		end
+		if old_cfg.gateway_conf.fake_gps ~= nil then
+			new_cfg.gateway_conf.fake_gps = old_cfg.gateway_conf.fake_gps
+		end
 		write_json(cfg_path, new_cfg)
 	end
+	if old_cfg and old_cfg.SX130x_conf and old_cfg.SX130x_conf.radio_0 and old_cfg.SX130x_conf.radio_0.tx_gain_lut then
+		if new_cfg and new_cfg.SX130x_conf and new_cfg.SX130x_conf.radio_0 then
+			new_cfg.SX130x_conf.radio_0.tx_gain_lut = old_cfg.SX130x_conf.radio_0.tx_gain_lut
+			write_json(cfg_path, new_cfg)
+		end
+	end
 
-	-- Update init script
 	local safe_region = region:gsub("'", "'\\''")
 	os.execute("sed -i \"s/^thisRegion=.*/thisRegion=" .. safe_region .. "/\" /etc/init.d/linxdot-lora-pkt-fwd")
 
-	-- Update settings.json
 	local settings_path = "/etc/linxdot-opensource/web/settings.json"
 	local cfg = parse_json(settings_path)
 	if cfg then
@@ -258,6 +325,168 @@ function action_set_port()
 			if write_json(get_config_path(r), cfg) then updated = true end
 		end
 	end
+
+	os.execute("/etc/init.d/linxdot-lora-pkt-fwd restart >/dev/null 2>&1")
+	luci.http.prepare_content("application/json")
+	luci.http.write_json({ result = updated })
+end
+
+function action_set_coords()
+	local lat = luci.http.formvalue("lat")
+	local lon = luci.http.formvalue("lon")
+	local alt = luci.http.formvalue("alt")
+
+	if lat == nil or lat == "" or lon == nil or lon == "" then
+		luci.http.status(400, "Bad Request")
+		luci.http.write_json({ result = false, error = "Latitude and longitude required" })
+		return
+	end
+
+	local lat_num = tonumber(lat)
+	local lon_num = tonumber(lon)
+	local alt_num = tonumber(alt) or 0
+
+	if lat_num == nil or lon_num == nil then
+		luci.http.status(400, "Bad Request")
+		luci.http.write_json({ result = false, error = "Invalid coordinates" })
+		return
+	end
+
+	if lat_num < -90 or lat_num > 90 or lon_num < -180 or lon_num > 180 then
+		luci.http.status(400, "Bad Request")
+		luci.http.write_json({ result = false, error = "Coordinates out of range" })
+		return
+	end
+
+	local updated = false
+	for _, r in ipairs(list_regions()) do
+		local cfg = parse_json(get_config_path(r))
+		if cfg and cfg.gateway_conf then
+			cfg.gateway_conf.ref_latitude = lat_num
+			cfg.gateway_conf.ref_longitude = lon_num
+			cfg.gateway_conf.ref_altitude = alt_num
+			cfg.gateway_conf.fake_gps = true
+			if write_json(get_config_path(r), cfg) then updated = true end
+		end
+	end
+
+	os.execute("/etc/init.d/linxdot-lora-pkt-fwd restart >/dev/null 2>&1")
+	luci.http.prepare_content("application/json")
+	luci.http.write_json({ result = updated })
+end
+
+function action_set_tx_power()
+	local max_pwr = luci.http.formvalue("max_power")
+	if not max_pwr or max_pwr == "" then
+		luci.http.status(400, "Bad Request")
+		luci.http.write_json({ result = false, error = "max_power required" })
+		return
+	end
+	local p = tonumber(max_pwr)
+	if not p or p < 0 or p > 27 then
+		luci.http.status(400, "Bad Request")
+		luci.http.write_json({ result = false, error = "Invalid max_power (0-27)" })
+		return
+	end
+
+	local backup_path = "/etc/linxdot-opensource/tx_gain_lut_backup.json"
+	local backup = parse_json(backup_path)
+	if not backup then
+		backup = {}
+		for _, r in ipairs(list_regions()) do
+			local cfg = parse_json(get_config_path(r))
+			if cfg and cfg.SX130x_conf and cfg.SX130x_conf.radio_0 and cfg.SX130x_conf.radio_0.tx_gain_lut then
+				backup[r] = cfg.SX130x_conf.radio_0.tx_gain_lut
+			end
+		end
+		write_json(backup_path, backup)
+	end
+
+	local updated = false
+	for _, r in ipairs(list_regions()) do
+		local cfg = parse_json(get_config_path(r))
+		if cfg and cfg.SX130x_conf and cfg.SX130x_conf.radio_0 then
+			local lut = backup[r] or cfg.SX130x_conf.radio_0.tx_gain_lut or {}
+			local new_lut = {}
+			for _, entry in ipairs(lut) do
+				if entry.rf_power and entry.rf_power <= p then
+					table.insert(new_lut, entry)
+				end
+			end
+			cfg.SX130x_conf.radio_0.tx_gain_lut = new_lut
+			if write_json(get_config_path(r), cfg) then updated = true end
+		end
+	end
+
+	os.execute("/etc/init.d/linxdot-lora-pkt-fwd restart >/dev/null 2>&1")
+	luci.http.prepare_content("application/json")
+	luci.http.write_json({ result = updated })
+end
+
+function action_set_tx_lut()
+	local lut_json = luci.http.formvalue("lut")
+	if not lut_json or lut_json == "" then
+		luci.http.status(400, "Bad Request")
+		luci.http.write_json({ result = false, error = "lut required" })
+		return
+	end
+
+	local jsonc = require "luci.jsonc"
+	local ok, lut = pcall(jsonc.parse, lut_json)
+	if not ok or type(lut) ~= "table" then
+		luci.http.status(400, "Bad Request")
+		luci.http.write_json({ result = false, error = "Invalid LUT JSON" })
+		return
+	end
+
+	for i, entry in ipairs(lut) do
+		if type(entry) ~= "table" then
+			luci.http.status(400, "Bad Request")
+			luci.http.write_json({ result = false, error = "LUT entry " .. i .. " is not an object" })
+			return
+		end
+		local rp = tonumber(entry.rf_power)
+		local pg = tonumber(entry.pa_gain)
+		local pi = tonumber(entry.pwr_idx)
+		if not rp or rp < 0 or rp > 27 then
+			luci.http.status(400, "Bad Request")
+			luci.http.write_json({ result = false, error = "LUT entry " .. i .. ": rf_power must be 0-27" })
+			return
+		end
+		if not pg or (pg ~= 0 and pg ~= 1) then
+			luci.http.status(400, "Bad Request")
+			luci.http.write_json({ result = false, error = "LUT entry " .. i .. ": pa_gain must be 0 or 1" })
+			return
+		end
+		if not pi or pi < 0 or pi > 22 then
+			luci.http.status(400, "Bad Request")
+			luci.http.write_json({ result = false, error = "LUT entry " .. i .. ": pwr_idx must be 0-22" })
+			return
+		end
+		entry.rf_power = rp
+		entry.pa_gain = pg
+		entry.pwr_idx = pi
+	end
+
+	-- sort by rf_power ascending
+	table.sort(lut, function(a, b) return a.rf_power < b.rf_power end)
+
+	local updated = false
+	for _, r in ipairs(list_regions()) do
+		local cfg = parse_json(get_config_path(r))
+		if cfg and cfg.SX130x_conf and cfg.SX130x_conf.radio_0 then
+			cfg.SX130x_conf.radio_0.tx_gain_lut = lut
+			if write_json(get_config_path(r), cfg) then updated = true end
+		end
+	end
+
+	-- update backup so set_tx_power continues to work with the new table
+	local backup_path = "/etc/linxdot-opensource/tx_gain_lut_backup.json"
+	local backup = {}
+	for _, r in ipairs(list_regions()) do
+		backup[r] = lut
+	end
+	write_json(backup_path, backup)
 
 	os.execute("/etc/init.d/linxdot-lora-pkt-fwd restart >/dev/null 2>&1")
 	luci.http.prepare_content("application/json")
