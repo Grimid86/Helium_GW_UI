@@ -28,6 +28,7 @@ return baseclass.extend({
 			[_('Longitude'), (data.ref_longitude !== undefined ? data.ref_longitude : '-')],
 			[_('Altitude (m)'), (data.ref_altitude !== undefined ? data.ref_altitude : '-')],
 			[_('Max TX Power'), (data.max_tx_power !== undefined ? data.max_tx_power + ' dBm' : '-')],
+			[_('Antenna Gain'), (data.antenna_gain !== undefined ? data.antenna_gain + ' dBi' : '-')],
 		];
 		for (var i = 0; i < rows.length; i++) {
 			table.appendChild(E('tr', { 'class': 'tr' }, [

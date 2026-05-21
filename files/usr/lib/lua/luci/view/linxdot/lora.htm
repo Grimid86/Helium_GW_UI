@@ -101,19 +101,6 @@
 	color: #c62828;
 	display: block;
 }
-#tx-lut-table {
-	width: 100%;
-	border-collapse: collapse;
-	margin-top: 0.5em;
-}
-#tx-lut-table th, #tx-lut-table td {
-	padding: 0.3em;
-	border: 1px solid #ddd;
-	text-align: left;
-}
-#tx-lut-table th {
-	background: #f5f5f5;
-}
 @media (max-width: 800px) {
 	.lora-grid {
 		grid-template-columns: 1fr;
@@ -189,9 +176,10 @@ function refreshStatus() {
 				txInput.value = (data.max_tx_power !== undefined) ? data.max_tx_power : '';
 				txInput.dataset.last = txInput.value;
 			}
-
-			if (data.tx_gain_lut) {
-				renderTxLut(data.tx_gain_lut);
+			var agInput = document.getElementById('antgain-input');
+			if (!agInput.value || agInput.dataset.last === agInput.value) {
+				agInput.value = (data.antenna_gain !== undefined) ? data.antenna_gain : '';
+				agInput.dataset.last = agInput.value;
 			}
 
 			var btnRestart = document.getElementById('btn-restart');
@@ -223,6 +211,7 @@ function refreshStatus() {
 			document.getElementById('val-lon').textContent = (data.ref_longitude !== undefined ? data.ref_longitude : '--');
 			document.getElementById('val-alt').textContent = (data.ref_altitude !== undefined ? data.ref_altitude : '--');
 			document.getElementById('val-txpower').textContent = (data.max_tx_power !== undefined ? data.max_tx_power : '--') + ' dBm';
+			document.getElementById('val-antgain').textContent = (data.antenna_gain !== undefined ? data.antenna_gain : '--') + ' dBi';
 		}
 	);
 }
@@ -324,62 +313,12 @@ function doSetTxPower() {
 	);
 }
 
-function renderTxLut(lut) {
-	var tbody = document.querySelector('#tx-lut-table tbody');
-	if (!tbody) return;
-	tbody.innerHTML = '';
-	if (!lut || lut.length === 0) {
-		addTxLutRow();
-		return;
-	}
-	for (var i = 0; i < lut.length; i++) {
-		var row = document.createElement('tr');
-		row.innerHTML = '<td><input type="number" step="any" style="width:80px" value="' + (lut[i].rf_power !== undefined ? lut[i].rf_power : '') + '" placeholder="0-27"/></td>' +
-			'<td><input type="number" style="width:60px" value="' + (lut[i].pa_gain !== undefined ? lut[i].pa_gain : '') + '" placeholder="0/1"/></td>' +
-			'<td><input type="number" style="width:60px" value="' + (lut[i].pwr_idx !== undefined ? lut[i].pwr_idx : '') + '" placeholder="0-22"/></td>' +
-			'<td><button class="cbi-button" onclick="removeTxLutRow(this)">🗑</button></td>';
-		tbody.appendChild(row);
-	}
-}
-
-function addTxLutRow() {
-	var tbody = document.querySelector('#tx-lut-table tbody');
-	if (!tbody) return;
-	var row = document.createElement('tr');
-	row.innerHTML = '<td><input type="number" step="any" style="width:80px" placeholder="0-27"/></td>' +
-		'<td><input type="number" style="width:60px" placeholder="0/1"/></td>' +
-		'<td><input type="number" style="width:60px" placeholder="0-22"/></td>' +
-		'<td><button class="cbi-button" onclick="removeTxLutRow(this)">🗑</button></td>';
-	tbody.appendChild(row);
-}
-
-function removeTxLutRow(btn) {
-	var row = btn.parentNode.parentNode;
-	row.parentNode.removeChild(row);
-}
-
-function doSetTxLut() {
-	var rows = document.querySelectorAll('#tx-lut-table tbody tr');
-	var lut = [];
-	for (var i = 0; i < rows.length; i++) {
-		var inputs = rows[i].querySelectorAll('input');
-		var rp = parseFloat(inputs[0].value);
-		var pg = parseInt(inputs[1].value);
-		var pi = parseInt(inputs[2].value);
-		if (isNaN(rp) || isNaN(pg) || isNaN(pi)) {
-			showMsg('<%:Fill all TX LUT fields%>', true);
-			return;
-		}
-		if (rp < 0 || rp > 27) { showMsg('<%:RF Power must be 0-27%>', true); return; }
-		if (pg !== 0 && pg !== 1) { showMsg('<%:PA Gain must be 0 or 1%>', true); return; }
-		if (pi < 0 || pi > 22) { showMsg('<%:PWR Index must be 0-22%>', true); return; }
-		lut.push({ rf_power: rp, pa_gain: pg, pwr_idx: pi });
-	}
-	lut.sort(function(a, b) { return a.rf_power - b.rf_power; });
-	if (!confirm('<%:Apply TX Gain Table with %> ' + lut.length + ' <%:entries? LoRa will restart.%>')) return;
-	loraXHR.post('<%=url("admin/services/lora/api/set_tx_lut")%>', { lut: JSON.stringify(lut) },
+function doSetAntennaGain() {
+	var g = parseFloat(document.getElementById('antgain-input').value);
+	if (isNaN(g)) { showMsg('<%:Enter valid antenna gain%>', true); return; }
+	loraXHR.post('<%=url("admin/services/lora/api/set_antenna_gain")%>', { gain: g },
 		function(x, data) {
-			showMsg('<%:TX Gain Table updated!%>', false);
+			showMsg('<%:Antenna Gain updated!%>', false);
 			setTimeout(refreshStatus, 3000);
 		}
 	);
@@ -473,23 +412,12 @@ window.addEventListener('beforeunload', stopRefresh);
 					<button class="cbi-button btn-apply" onclick="doSetTxPower()"><%:Apply%></button>
 				</span>
 			</div>
-			<div class="lora-row" style="flex-direction:column;align-items:flex-start;border-bottom:none;">
-				<span class="lora-label"><%:TX Gain Table%></span>
-				<table id="tx-lut-table">
-					<thead>
-						<tr>
-							<th><%:RF Power (dBm)%></th>
-							<th><%:PA Gain%></th>
-							<th><%:PWR Index%></th>
-							<th></th>
-						</tr>
-					</thead>
-					<tbody></tbody>
-				</table>
-				<div style="margin-top:0.5em;">
-					<button class="cbi-button" onclick="addTxLutRow()">+ <%:Add row%></button>
-					<button class="cbi-button btn-apply" onclick="doSetTxLut()"><%:Apply Table%></button>
-				</div>
+			<div class="lora-row">
+				<span class="lora-label"><%:Antenna Gain (dBi)%></span>
+				<span>
+					<input type="number" step="any" id="antgain-input" placeholder="0" style="width:80px"/>
+					<button class="cbi-button btn-apply" onclick="doSetAntennaGain()"><%:Apply%></button>
+				</span>
 			</div>
 			<div class="lora-row">
 				<span class="lora-label"><%:Gateway ID%></span>
@@ -558,6 +486,10 @@ window.addEventListener('beforeunload', stopRefresh);
 			<div class="lora-row">
 				<span class="lora-label"><%:Max TX Power%></span>
 				<span class="lora-value" id="val-txpower">--</span>
+			</div>
+			<div class="lora-row">
+				<span class="lora-label"><%:Antenna Gain%></span>
+				<span class="lora-value" id="val-antgain">--</span>
 			</div>
 		</div>
 	</div>

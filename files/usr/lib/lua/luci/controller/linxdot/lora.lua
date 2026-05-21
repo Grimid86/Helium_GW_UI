@@ -11,7 +11,7 @@ function index()
 	entry({"admin", "services", "lora", "api", "set_port"}, call("action_set_port")).leaf = true
 	entry({"admin", "services", "lora", "api", "set_coords"}, call("action_set_coords")).leaf = true
 	entry({"admin", "services", "lora", "api", "set_tx_power"}, call("action_set_tx_power")).leaf = true
-	entry({"admin", "services", "lora", "api", "set_tx_lut"}, call("action_set_tx_lut")).leaf = true
+	entry({"admin", "services", "lora", "api", "set_antenna_gain"}, call("action_set_antenna_gain")).leaf = true
 	entry({"admin", "services", "lora", "api", "logs"}, call("action_logs")).leaf = true
 end
 
@@ -139,16 +139,19 @@ function action_status()
 
 	local max_tx = 0
 	if cfg and cfg.SX130x_conf and cfg.SX130x_conf.radio_0 and cfg.SX130x_conf.radio_0.tx_gain_lut then
-		status.tx_gain_lut = cfg.SX130x_conf.radio_0.tx_gain_lut
 		for _, entry in ipairs(cfg.SX130x_conf.radio_0.tx_gain_lut) do
 			if entry.rf_power and entry.rf_power > max_tx then
 				max_tx = entry.rf_power
 			end
 		end
-	else
-		status.tx_gain_lut = {}
 	end
 	status.max_tx_power = max_tx
+
+	if cfg and cfg.SX130x_conf then
+		status.antenna_gain = cfg.SX130x_conf.antenna_gain or 0
+	else
+		status.antenna_gain = 0
+	end
 
 	local log = read_file("/var/log/lora_pkt_fwd.log", 32768)
 	status.log_snippet = log
@@ -258,6 +261,12 @@ function action_set_region()
 	if old_cfg and old_cfg.SX130x_conf and old_cfg.SX130x_conf.radio_0 and old_cfg.SX130x_conf.radio_0.tx_gain_lut then
 		if new_cfg and new_cfg.SX130x_conf and new_cfg.SX130x_conf.radio_0 then
 			new_cfg.SX130x_conf.radio_0.tx_gain_lut = old_cfg.SX130x_conf.radio_0.tx_gain_lut
+			write_json(cfg_path, new_cfg)
+		end
+	end
+	if old_cfg and old_cfg.SX130x_conf and old_cfg.SX130x_conf.antenna_gain ~= nil then
+		if new_cfg and new_cfg.SX130x_conf then
+			new_cfg.SX130x_conf.antenna_gain = old_cfg.SX130x_conf.antenna_gain
 			write_json(cfg_path, new_cfg)
 		end
 	end
@@ -423,70 +432,28 @@ function action_set_tx_power()
 	luci.http.write_json({ result = updated })
 end
 
-function action_set_tx_lut()
-	local lut_json = luci.http.formvalue("lut")
-	if not lut_json or lut_json == "" then
+function action_set_antenna_gain()
+	local gain = luci.http.formvalue("gain")
+	if gain == nil or gain == "" then
 		luci.http.status(400, "Bad Request")
-		luci.http.write_json({ result = false, error = "lut required" })
+		luci.http.write_json({ result = false, error = "gain required" })
 		return
 	end
-
-	local jsonc = require "luci.jsonc"
-	local ok, lut = pcall(jsonc.parse, lut_json)
-	if not ok or type(lut) ~= "table" then
+	local g = tonumber(gain)
+	if g == nil then
 		luci.http.status(400, "Bad Request")
-		luci.http.write_json({ result = false, error = "Invalid LUT JSON" })
+		luci.http.write_json({ result = false, error = "Invalid gain" })
 		return
 	end
-
-	for i, entry in ipairs(lut) do
-		if type(entry) ~= "table" then
-			luci.http.status(400, "Bad Request")
-			luci.http.write_json({ result = false, error = "LUT entry " .. i .. " is not an object" })
-			return
-		end
-		local rp = tonumber(entry.rf_power)
-		local pg = tonumber(entry.pa_gain)
-		local pi = tonumber(entry.pwr_idx)
-		if not rp or rp < 0 or rp > 27 then
-			luci.http.status(400, "Bad Request")
-			luci.http.write_json({ result = false, error = "LUT entry " .. i .. ": rf_power must be 0-27" })
-			return
-		end
-		if not pg or (pg ~= 0 and pg ~= 1) then
-			luci.http.status(400, "Bad Request")
-			luci.http.write_json({ result = false, error = "LUT entry " .. i .. ": pa_gain must be 0 or 1" })
-			return
-		end
-		if not pi or pi < 0 or pi > 22 then
-			luci.http.status(400, "Bad Request")
-			luci.http.write_json({ result = false, error = "LUT entry " .. i .. ": pwr_idx must be 0-22" })
-			return
-		end
-		entry.rf_power = rp
-		entry.pa_gain = pg
-		entry.pwr_idx = pi
-	end
-
-	-- sort by rf_power ascending
-	table.sort(lut, function(a, b) return a.rf_power < b.rf_power end)
 
 	local updated = false
 	for _, r in ipairs(list_regions()) do
 		local cfg = parse_json(get_config_path(r))
-		if cfg and cfg.SX130x_conf and cfg.SX130x_conf.radio_0 then
-			cfg.SX130x_conf.radio_0.tx_gain_lut = lut
+		if cfg and cfg.SX130x_conf then
+			cfg.SX130x_conf.antenna_gain = g
 			if write_json(get_config_path(r), cfg) then updated = true end
 		end
 	end
-
-	-- update backup so set_tx_power continues to work with the new table
-	local backup_path = "/etc/linxdot-opensource/tx_gain_lut_backup.json"
-	local backup = {}
-	for _, r in ipairs(list_regions()) do
-		backup[r] = lut
-	end
-	write_json(backup_path, backup)
 
 	os.execute("/etc/init.d/linxdot-lora-pkt-fwd restart >/dev/null 2>&1")
 	luci.http.prepare_content("application/json")
